@@ -1,0 +1,113 @@
+name: Build PocketPC VM Beta
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: pocketpc-vm-build
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout PocketPC VM workflow repository
+        uses: actions/checkout@v4
+
+      - name: Download Vectras VM Community source
+        uses: actions/checkout@v4
+        with:
+          repository: xoureldeen/Vectras-VM-Android
+          ref: main
+          path: upstream
+          fetch-depth: 1
+
+      - name: Set up Java 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android build components
+        run: |
+          sdkmanager --install \
+            "platforms;android-37" \
+            "build-tools;36.1.0" \
+            "ndk;27.3.13750724" \
+            "cmake;3.22.1"
+          yes | sdkmanager --licenses
+
+      - name: Apply PocketPC VM branding
+        working-directory: upstream
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          strings = Path("app/src/main/res/values/strings.xml")
+          text = strings.read_text()
+          old = '<string name="app_name">Vectras VM Github</string>'
+          new = '<string name="app_name">PocketPC VM</string>'
+          if old not in text:
+              raise SystemExit("Could not find the expected app_name entry; upstream may have changed.")
+          strings.write_text(text.replace(old, new, 1))
+
+          config = Path("app/src/main/java/com/vectras/qemu/Config.java")
+          if config.exists():
+              text = config.read_text()
+              text = text.replace(
+                  'public static final String APP_NAME = "Vectras Emulator";',
+                  'public static final String APP_NAME = "PocketPC VM";'
+              )
+              config.write_text(text)
+
+          # The upstream debug signing config points to a repository keystore.
+          # Remove that explicit debug signing so Gradle uses its normal debug key.
+          gradle = Path("app/build.gradle")
+          text = gradle.read_text()
+          text = text.replace(
+              "        debug {\n            signingConfig signingConfigs.debug\n",
+              "        debug {\n"
+          )
+          gradle.write_text(text)
+          PY
+
+      - name: Build universal debug APK
+        working-directory: upstream
+        run: |
+          chmod +x ./gradlew
+          ./gradlew --no-daemon --stacktrace :app:assembleDebug
+
+      - name: Locate APK
+        id: apk
+        working-directory: upstream
+        shell: bash
+        run: |
+          APK="$(find app/build/outputs/apk/debug -maxdepth 1 -type f -name '*.apk' | head -n 1)"
+          if [ -z "$APK" ]; then
+            echo "No debug APK was produced."
+            find app/build/outputs -maxdepth 5 -type f || true
+            exit 1
+          fi
+          mkdir -p ../release-files
+          cp "$APK" ../release-files/PocketPC-VM-beta.apk
+          echo "path=release-files/PocketPC-VM-beta.apk" >> "$GITHUB_OUTPUT"
+
+      - name: Publish APK to GitHub Releases
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: beta-${{ github.run_number }}
+          name: PocketPC VM Beta ${{ github.run_number }}
+          prerelease: true
+          generate_release_notes: true
+          files: release-files/PocketPC-VM-beta.apk
+          fail_on_unmatched_files: true
+          
